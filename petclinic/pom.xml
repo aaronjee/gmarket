@@ -396,11 +396,11 @@
   <distributionManagement>
     <repository>
       <id>app-release</id>
-      <url>https://nexus.ocp4.gwnjy.com:8084/repository/app-release/</url>
+      <url>https://nexus.apps.cloud.jee.local:8084/repository/app-release/</url>
     </repository>
     <snapshotRepository>
       <id>app-snapshots</id>
-      <url>https://nexus.ocp4.gwnjy.com:8084/repository/app-snapshots/</url>
+      <url>https://nexus.apps.cloud.jee.local:8084/repository/app-snapshots/</url>
     </snapshotRepository>
   </distributionManagement>
   
