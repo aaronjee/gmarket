@@ -1,0 +1,151 @@
+### 윈도우 컨테이너 노드 구성 ###
+
+#1. 클러스터 네트워크 확인
+$ oc get network cluster -oyaml
+apiVersion: config.openshift.io/v1
+kind: Network
+metadata:
+  creationTimestamp: "2024-01-10T07:45:24Z"
+  generation: 2
+  name: cluster
+  resourceVersion: "3043"
+  uid: 80bcd0bf-f623-4610-b1f3-1e0d424f7717
+spec:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  externalIP:
+    policy: {}
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+status:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  clusterNetworkMTU: 1400
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+
+#2. ## hybrid overlay network 설정
+$ oc patch networks.operator.openshift.io cluster --type=merge \
+  -p '{
+    "spec":{
+      "defaultNetwork":{
+        "ovnKubernetesConfig":{
+          "hybridOverlayConfig":{
+            "hybridClusterNetwork":[
+              {
+                "cidr": "10.132.0.0/14",
+                "hostPrefix": 23
+              }
+            ]
+          }
+        }
+      }
+    }
+  }'
+
+#3. 적용 확인
+$ oc get network.operator cluster -o \
+jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig}{"\n"}' | jq -r
+
+{
+  "egressIPConfig": {},
+  "gatewayConfig": {
+    "routingViaHost": false
+  },
+  "genevePort": 6081,
+  "hybridOverlayConfig": {
+    "hybridClusterNetwork": [
+      {
+        "cidr": "10.132.0.0/14",
+        "hostPrefix": 23
+      }
+    ]
+  },
+  "mtu": 1400,
+  "policyAuditConfig": {
+    "destination": "null",
+    "maxFileSize": 50,
+    "maxLogFiles": 5,
+    "rateLimit": 20,
+    "syslogFacility": "local0"
+  }
+}
+
+#4. Windows Machine Config Operator 설치
+
+
+#5. ssh private key를 secret에 등록
+$ oc create secret generic cloud-private-key --from-file=private-key.pem=${HOME}/.ssh/id_rsa -n openshift-windows-machine-config-operator
+
+
+
+#6. 윈도우 인스턴스용 configmap 생성
+kind: ConfigMap
+apiVersion: v1
+metadata:
+ name: windows-instances
+ namespace: openshift-windows-machine-config-operator
+data:
+ 10.76.166.132: |-
+   username=Administrator
+
+
+#7. CSR 승인
+$ oc get csr -o name | xargs oc adm certificate approve
+
+
+#8. 워크로드 구성
+$ oc describe node ocp-win-worker-1 | grep Taint
+Taints:             os=Windows:NoSchedule
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: win-webserver
+  labels:
+    app: win-webserver
+spec:
+  ports:
+    # the port that this service should serve on
+    - port: 80
+      targetPort: 80
+  selector:
+    app: win-webserver
+  type: ClusterIP 
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: win-webserver
+  name: win-webserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: win-webserver
+  template:
+    metadata:
+      labels:
+        app: win-webserver
+      name: win-webserver
+    spec:
+     containers:
+      - name: windowswebserver
+        image: mcr.microsoft.com/windows/servercore:ltsc2022
+        command:
+        - powershell.exe
+        - -command
+        - "<#code used from https://gist.github.com/19WAS85/5424431#> ; $$listener = New-Object System.Net.HttpListener ; $$listener.Prefixes.Add('http://*:80/') ; $$listener.Start() ; $$callerCounts = @{} ; Write-Host('Listening at http://*:80/') ; while ($$listener.IsListening) { ;$$context = $$listener.GetContext() ;$$requestUrl = $$context.Request.Url ;$$clientIP = $$context.Request.RemoteEndPoint.Address ;$$response = $$context.Response ;Write-Host '' ;Write-Host('> {0}' -f $$requestUrl) ;  ;$$count = 1 ;$$k=$$callerCounts.Get_Item($$clientIP) ;if ($$k -ne $$null) { $$count += $$k } ;$$callerCounts.Set_Item($$clientIP, $$count) ;$$ip=(Get-NetAdapter | Get-NetIpAddress); $$header='<html><body><H1>Windows Container Web Server</H1>' ;$$callerCountsString='' ;$$callerCounts.Keys | % { $$callerCountsString+='<p>IP {0} callerCount {1} ' -f $$ip[1].IPAddress,$$callerCounts.Item($$_) } ;$$footer='</body></html>' ;$$content='{0}{1}{2}' -f $$header,$$callerCountsString,$$footer ;Write-Output $$content ;$$buffer = [System.Text.Encoding]::UTF8.GetBytes($$content) ;$$response.ContentLength64 = $$buffer.Length ;$$response.OutputStream.Write($$buffer, 0, $$buffer.Length) ;$$response.Close() ;$$responseStatus = $$response.StatusCode ;Write-Host('< {0}' -f $$responseStatus)  } ; "
+     nodeSelector:
+      kubernetes.io/os: windows
+     tolerations:
+        - key: os
+          operator: Equal
+          value: Windows
+          effect: NoSchedule
